@@ -1,0 +1,108 @@
+apiVersion: v1
+kind: List
+items:
+  # PostgreSQL Deployment
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: postgres
+      labels:
+        app: postgres
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: postgres
+      template:
+        metadata:
+          labels:
+            app: postgres
+        spec:
+          containers:
+            - name: postgres
+              image: postgres:15-alpine
+              ports:
+                - containerPort: 5432
+              env:
+                - name: POSTGRES_USER
+                  value: "pacman"
+                - name: POSTGRES_PASSWORD
+                  value: "pacman123"
+                - name: POSTGRES_DB
+                  value: "pacmandb"
+              volumeMounts:
+                - name: postgres-data
+                  mountPath: /var/lib/postgresql/data
+          volumes:
+            - name: postgres-data
+              emptyDir: {}
+  
+  # PostgreSQL Service
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: postgres
+    spec:
+      selector:
+        app: postgres
+      ports:
+        - port: 5432
+          targetPort: 5432
+  
+  # Pacman Application Deployment
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: pacman
+      labels:
+        app: pacman
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: pacman
+      template:
+        metadata:
+          labels:
+            app: pacman
+        spec:
+          containers:
+            - name: pacman
+              image: image-registry.openshift-image-registry.svc:5000/redida-dev/pacman:latest
+              ports:
+                - containerPort: 3000
+              env:
+                - name: POSTGRESQL_HOST
+                  value: "postgres"
+                - name: POSTGRESQL_USER
+                  value: "pacman"
+                - name: POSTGRESQL_PASSWORD
+                  value: "pacman123"
+                - name: POSTGRESQL_DATABASE
+                  value: "pacmandb"
+                - name: POSTGRESQL_PORT
+                  value: "5432"
+  
+  # Pacman Service
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: pacman
+    spec:
+      selector:
+        app: pacman
+      ports:
+        - port: 3000
+          targetPort: 3000
+  
+  # Pacman Route
+  - apiVersion: route.openshift.io/v1
+    kind: Route
+    metadata:
+      name: pacman
+    spec:
+      to:
+        kind: Service
+        name: pacman
+      port:
+        targetPort: 3000

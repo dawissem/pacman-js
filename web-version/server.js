@@ -8,15 +8,32 @@ const io = require('socket.io')(server, {
     }
 });
 const cors = require('cors');
+const { Pool } = require('pg');
 
 app.use(cors());
 app.use(express.static('.'));
 
-// In-memory storage (use MongoDB/PostgreSQL for production)
-const rooms = {};
-const scores = [];
+// PostgreSQL connection
+const pool = new Pool({
+    user: process.env.POSTGRESQL_USER || 'pacman',
+    host: process.env.POSTGRESQL_HOST || 'postgres',
+    database: process.env.POSTGRESQL_DATABASE || 'pacmandb',
+    password: process.env.POSTGRESQL_PASSWORD || 'pacman123',
+    port: process.env.POSTGRESQL_PORT || 5432
+});
 
-// Generate random room code
+// Test database connection
+pool.query('SELECT NOW()', (err, res) => {
+    if (err) {
+        console.error('Database connection error:', err);
+    } else {
+        console.log('Database connected successfully');
+    }
+});
+
+// In-memory storage for rooms (keep this for multiplayer)
+const rooms = {};
+
 function generateRoomCode() {
     return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
@@ -24,7 +41,6 @@ function generateRoomCode() {
 io.on('connection', (socket) => {
     console.log('Player connected:', socket.id);
 
-    // Create room
     socket.on('createRoom', (playerName) => {
         const roomCode = generateRoomCode();
         rooms[roomCode] = {
@@ -45,7 +61,6 @@ io.on('connection', (socket) => {
         console.log(`Room ${roomCode} created by ${playerName}`);
     });
 
-    // Join room
     socket.on('joinRoom', ({ roomCode, playerName }) => {
         if (!rooms[roomCode]) {
             socket.emit('error', 'Room not found');
@@ -69,7 +84,6 @@ io.on('connection', (socket) => {
         rooms[roomCode].players.push(player);
         socket.join(roomCode);
         
-        // Notify all players in room
         io.to(roomCode).emit('playerJoined', {
             players: rooms[roomCode].players
         });
@@ -77,7 +91,6 @@ io.on('connection', (socket) => {
         console.log(`${playerName} joined room ${roomCode}`);
     });
 
-    // Start game
     socket.on('startGame', (roomCode) => {
         if (!rooms[roomCode] || rooms[roomCode].host !== socket.id) {
             socket.emit('error', 'Only host can start game');
@@ -89,7 +102,6 @@ io.on('connection', (socket) => {
         console.log(`Game started in room ${roomCode}`);
     });
 
-    // Update player state
     socket.on('updatePlayer', ({ roomCode, playerState }) => {
         if (!rooms[roomCode]) return;
 
@@ -97,7 +109,6 @@ io.on('connection', (socket) => {
         if (player) {
             Object.assign(player, playerState);
             
-            // Broadcast to other players
             socket.to(roomCode).emit('playerUpdated', {
                 playerId: socket.id,
                 state: playerState
@@ -105,36 +116,32 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Game over
-    socket.on('gameOver', ({ roomCode, playerName, score }) => {
-        saveScore(playerName, score);
+    socket.on('gameOver', async ({ roomCode, playerName, score }) => {
+        await saveScore(playerName, score);
         io.to(roomCode).emit('playerFinished', { playerName, score });
     });
 
-    // Leave room
     socket.on('leaveRoom', (roomCode) => {
         leaveRoom(socket, roomCode);
     });
 
-    // Disconnect
     socket.on('disconnect', () => {
         console.log('Player disconnected:', socket.id);
         
-        // Remove from all rooms
         Object.keys(rooms).forEach(roomCode => {
             leaveRoom(socket, roomCode);
         });
     });
 
-    // Get leaderboard
-    socket.on('getLeaderboard', () => {
-        socket.emit('leaderboard', getTopScores());
+    socket.on('getLeaderboard', async () => {
+        const scores = await getTopScores();
+        socket.emit('leaderboard', scores);
     });
 
-    // Save score
-    socket.on('saveScore', ({ playerName, score }) => {
-        saveScore(playerName, score);
-        io.emit('leaderboard', getTopScores());
+    socket.on('saveScore', async ({ playerName, score }) => {
+        await saveScore(playerName, score);
+        const scores = await getTopScores();
+        io.emit('leaderboard', scores);
     });
 });
 
@@ -147,7 +154,6 @@ function leaveRoom(socket, roomCode) {
         delete rooms[roomCode];
         console.log(`Room ${roomCode} deleted`);
     } else {
-        // If host left, assign new host
         if (rooms[roomCode].host === socket.id) {
             rooms[roomCode].host = rooms[roomCode].players[0].id;
         }
@@ -160,28 +166,35 @@ function leaveRoom(socket, roomCode) {
     socket.leave(roomCode);
 }
 
-function saveScore(playerName, score) {
-    scores.push({
-        name: playerName,
-        score: score,
-        date: new Date()
-    });
-    
-    scores.sort((a, b) => b.score - a.score);
-    
-    // Keep top 100
-    if (scores.length > 100) {
-        scores.length = 100;
+async function saveScore(playerName, score) {
+    try {
+        await pool.query(
+            'INSERT INTO scores (player_name, score) VALUES ($1, $2)',
+            [playerName, score]
+        );
+        console.log(`Score saved: ${playerName} - ${score}`);
+    } catch (err) {
+        console.error('Error saving score:', err);
     }
 }
 
-function getTopScores(limit = 10) {
-    return scores.slice(0, limit);
+async function getTopScores(limit = 10) {
+    try {
+        const result = await pool.query(
+            'SELECT player_name, score, created_at FROM scores ORDER BY score DESC LIMIT $1',
+            [limit]
+        );
+        return result.rows;
+    } catch (err) {
+        console.error('Error getting scores:', err);
+        return [];
+    }
 }
 
 // API endpoints
-app.get('/api/leaderboard', (req, res) => {
-    res.json(getTopScores());
+app.get('/api/leaderboard', async (req, res) => {
+    const scores = await getTopScores();
+    res.json(scores);
 });
 
 app.get('/api/rooms', (req, res) => {
@@ -191,6 +204,10 @@ app.get('/api/rooms', (req, res) => {
         gameStarted: rooms[code].gameStarted
     }));
     res.json(roomList);
+});
+
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok' });
 });
 
 const PORT = process.env.PORT || 3000;
